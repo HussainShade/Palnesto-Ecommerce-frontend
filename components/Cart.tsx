@@ -46,12 +46,15 @@ export default function Cart({ shirts, isOpen, onClose, onCartUpdate }: CartProp
     <>
       {/* Overlay */}
       <div
-        className="fixed inset-0 bg-black bg-opacity-50 z-40"
+        className="fixed inset-0 backdrop-blur-sm bg-gray-900/40 z-40"
         onClick={onClose}
       />
       
       {/* Cart Sidebar */}
-      <div className="fixed right-0 top-0 h-full w-full max-w-md bg-white shadow-xl z-50 flex flex-col">
+      <div 
+        className="fixed right-0 top-0 h-full w-full max-w-md bg-white shadow-xl z-50 flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="flex items-center justify-between p-4 border-b">
           <h2 className="text-xl font-semibold">Shopping Cart</h2>
           <button

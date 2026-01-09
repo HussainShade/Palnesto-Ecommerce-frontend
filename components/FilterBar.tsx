@@ -7,8 +7,8 @@ interface FilterBarProps {
   onFiltersChange: (filters: ShirtFilters) => void;
 }
 
-const SIZES: ShirtSize[] = ['XS', 'S', 'M', 'L', 'XL', 'XXL'];
-const TYPES: ShirtType[] = ['T-Shirt', 'Polo', 'Hoodie', 'Sweatshirt', 'Tank Top'];
+const SIZES: ShirtSize[] = ['M', 'L', 'XL', 'XXL'];
+const TYPES: ShirtType[] = ['Casual', 'Formal', 'Wedding', 'Sports', 'Vintage'];
 
 export default function FilterBar({ filters, onFiltersChange }: FilterBarProps) {
   const handleSizeChange = (size: ShirtSize | '') => {

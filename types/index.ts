@@ -1,7 +1,7 @@
-// Shirt types
-export type ShirtSize = 'XS' | 'S' | 'M' | 'L' | 'XL' | 'XXL';
+// Shirt types (matching backend API)
+export type ShirtSize = 'M' | 'L' | 'XL' | 'XXL';
 
-export type ShirtType = 'T-Shirt' | 'Polo' | 'Hoodie' | 'Sweatshirt' | 'Tank Top';
+export type ShirtType = 'Casual' | 'Formal' | 'Wedding' | 'Sports' | 'Vintage';
 
 export interface Shirt {
   id: string;
@@ -59,3 +59,87 @@ export interface LoginResponse {
   message?: string;
 }
 
+// Shirt creation/update types
+export interface Discount {
+  type: 'percentage' | 'amount';
+  value: number;
+}
+
+export interface CreateShirtData {
+  name: string;
+  description?: string;
+  size: ShirtSize;
+  type: ShirtType;
+  price: number;
+  discount?: Discount | null;
+  stock?: number;
+}
+
+// Batch create request format (matches backend API)
+export interface BatchCreateShirtData {
+  name: string;
+  description?: string;
+  type: ShirtType;
+  price: number;
+  discount?: Discount | null;
+  sizes: Array<{ size: ShirtSize; stock: number }>;
+}
+
+export interface UpdateShirtData {
+  name?: string;
+  description?: string;
+  size?: ShirtSize;
+  type?: ShirtType;
+  price?: number;
+  discount?: Discount | null;
+  stock?: number;
+  sizes?: Array<{ size: ShirtSize; stock: number }>; // For creating new size variants
+}
+
+// Backend shirt response format
+export interface BackendShirt {
+  _id: string;
+  sellerId: string;
+  name: string;
+  description?: string;
+  size: ShirtSize;
+  type: ShirtType;
+  price: number;
+  discount?: Discount;
+  finalPrice: number;
+  stock: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// Grouped shirt response format (when groupBy=design)
+export interface GroupedShirtResponse {
+  _id: string;
+  sellerId: string;
+  name: string;
+  description?: string;
+  type: ShirtType;
+  price: number;
+  discount?: Discount;
+  finalPrice: number;
+  totalStock: number;
+  availableSizes: ShirtSize[];
+  variants: Array<{
+    _id: string;
+    size: ShirtSize;
+    stock: number;
+    finalPrice: number;
+  }>;
+}
+
+// Frontend grouped shirt type
+export interface GroupedShirt {
+  id: string;
+  name: string;
+  description: string;
+  type: ShirtType;
+  originalPrice: number;
+  discountedPrice: number;
+  variants: Shirt[];
+  availableSizes: ShirtSize[];
+}

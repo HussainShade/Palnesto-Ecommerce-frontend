@@ -29,9 +29,8 @@ export default function SellerLoginPage() {
         // Redirect after successful login
         // Note: Backend should handle session via HTTP-only cookies
         setTimeout(() => {
-          // Redirect to seller dashboard or home
-          // router.push('/seller/dashboard');
-          router.push('/');
+          // Redirect to seller dashboard after successful login
+          router.push('/seller/dashboard');
         }, 1500);
       } else {
         setError(response.message || 'Login failed');
