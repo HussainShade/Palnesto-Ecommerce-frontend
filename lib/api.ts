@@ -11,9 +11,99 @@ import type {
   BatchCreateShirtData,
   GroupedShirt,
   GroupedShirtResponse,
+  AdminLoginResponse,
+  CustomerSignupData,
+  CreateSellerData,
+  ShirtSize,
+  ShirtType,
 } from '@/types';
+import { referenceDataManager } from './referenceData';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000/api';
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL?.replace('/api', '') || 'http://localhost:5000';
+
+/**
+ * Helper to extract size from backend response (handles both object and string)
+ * NEW API uses sizeRef or sizeReference
+ */
+function extractSize(backendShirt: BackendShirt | any): ShirtSize {
+  // API documentation shows both 'sizeRef' (in grouped/list responses) and 'sizeReference' (in single shirt response)
+  // Check both, prioritizing 'sizeReference' as it's used in GET /api/shirts/:id
+  if (backendShirt.sizeReference) {
+    if (typeof backendShirt.sizeReference === 'object' && backendShirt.sizeReference.name) {
+      return backendShirt.sizeReference.name;
+    }
+  }
+  if (backendShirt.sizeRef) {
+    if (typeof backendShirt.sizeRef === 'object' && backendShirt.sizeRef.name) {
+      return backendShirt.sizeRef.name;
+    }
+  }
+  
+  // Legacy support
+  if (backendShirt.shirtSize) {
+    if (typeof backendShirt.shirtSize === 'object' && backendShirt.shirtSize.name) {
+      return backendShirt.shirtSize.name;
+    }
+    if (typeof backendShirt.shirtSize === 'string') {
+      return backendShirt.shirtSize as ShirtSize;
+    }
+  }
+  if (backendShirt.size) {
+    return backendShirt.size;
+  }
+  
+  console.warn('Could not extract size from:', backendShirt);
+  return 'M'; // Default fallback
+}
+
+/**
+ * Helper to extract type from backend response (handles both object and string)
+ */
+function extractType(backendShirt: BackendShirt | any): ShirtType {
+  if (backendShirt.shirtType) {
+    if (typeof backendShirt.shirtType === 'object' && backendShirt.shirtType.name) {
+      return backendShirt.shirtType.name;
+    }
+    if (typeof backendShirt.shirtType === 'string') {
+      return backendShirt.shirtType as ShirtType;
+    }
+  }
+  if (backendShirt.type) {
+    return backendShirt.type;
+  }
+  return 'Casual'; // Default fallback
+}
+
+/**
+ * Helper to extract imageUrl from backend response
+ */
+function extractImageUrl(backendShirt: BackendShirt | any): string {
+  return backendShirt.imageURL || 'https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A';
+}
+
+/**
+ * Map backend shirt to frontend shirt format
+ */
+function mapBackendShirtToShirt(backendShirt: BackendShirt): Shirt {
+  // Extract reference data for future use
+  referenceDataManager.extractFromShirt(backendShirt);
+  
+  const size = extractSize(backendShirt);
+  const type = extractType(backendShirt);
+  
+  return {
+    id: backendShirt._id,
+    name: backendShirt.name,
+    description: backendShirt.description || '',
+    imageUrl: extractImageUrl(backendShirt),
+    originalPrice: backendShirt.price,
+    discountedPrice: backendShirt.finalPrice,
+    size,
+    type,
+    stock: backendShirt.stock || 0,
+  };
+}
 
 /**
  * API abstraction layer
@@ -35,9 +125,36 @@ export async function fetchShirts(
   const paginationWithDefaults = pagination || { page: 1, limit: 12 };
   const params = new URLSearchParams();
   
-  // Add filters
-  if (filtersWithDefaults.size) params.append('size', filtersWithDefaults.size);
-  if (filtersWithDefaults.type) params.append('type', filtersWithDefaults.type);
+  // Add filters - Backend now supports both ObjectId and string formats
+  // Prefer string format for better developer experience
+  if (filtersWithDefaults.sizeReferenceId) {
+    // Check if it's an ObjectId or a string value
+    const isObjectId = /^[0-9a-fA-F]{24}$/.test(filtersWithDefaults.sizeReferenceId);
+    if (isObjectId) {
+      params.append('sizeReferenceId', filtersWithDefaults.sizeReferenceId);
+    } else {
+      // String value (M, L, XL, XXL) - use 'size' parameter
+      params.append('size', filtersWithDefaults.sizeReferenceId);
+    }
+  } else if (filtersWithDefaults.size) {
+    // Direct string value - backend accepts this directly
+    params.append('size', filtersWithDefaults.size);
+  }
+  
+  if (filtersWithDefaults.shirtTypeId) {
+    // Check if it's an ObjectId or a string value
+    const isObjectId = /^[0-9a-fA-F]{24}$/.test(filtersWithDefaults.shirtTypeId);
+    if (isObjectId) {
+      params.append('shirtTypeId', filtersWithDefaults.shirtTypeId);
+    } else {
+      // String value (Casual, Formal, etc.) - use 'type' parameter
+      params.append('type', filtersWithDefaults.shirtTypeId);
+    }
+  } else if (filtersWithDefaults.type) {
+    // Direct string value - backend accepts this directly
+    params.append('type', filtersWithDefaults.type);
+  }
+  
   if (filtersWithDefaults.minPrice !== undefined) params.append('minPrice', filtersWithDefaults.minPrice.toString());
   if (filtersWithDefaults.maxPrice !== undefined) params.append('maxPrice', filtersWithDefaults.maxPrice.toString());
   
@@ -65,31 +182,55 @@ export async function fetchShirts(
   if (apiResponse.success && apiResponse.data) {
     const backendData = apiResponse.data;
     
+    // Extract reference data from responses FIRST (before mapping)
+    // This ensures filters can work on subsequent requests
+    backendData.shirts.forEach((shirt: BackendShirt | GroupedShirtResponse) => {
+      if ('variants' in shirt) {
+        referenceDataManager.extractFromGroupedShirt(shirt as GroupedShirtResponse);
+      } else {
+        referenceDataManager.extractFromShirt(shirt as BackendShirt);
+      }
+    });
+    
+    // Check if we had filters that couldn't be applied due to missing reference data
+    // If so, we could trigger a re-fetch, but for now we'll just let the user change filters again
+    // The reference data is now populated, so next filter change will work
+    
     // If grouped response
     if (groupBy === 'design') {
       return {
         data: backendData.shirts.map((groupedShirt: GroupedShirtResponse) => {
-          // Map variants to Shirt format
-          const variants: Shirt[] = groupedShirt.variants.map(variant => ({
-            id: variant._id,
-            name: groupedShirt.name,
-            description: groupedShirt.description || '',
-            imageUrl: '/placeholder-shirt.jpg',
-            originalPrice: groupedShirt.price,
-            discountedPrice: variant.finalPrice,
-            size: variant.size,
-            type: groupedShirt.type,
-            stock: variant.stock || 0,
-          }));
+          const type = extractType(groupedShirt);
+          
+          // Map variants to Shirt format - NEW API: each variant has its own price and imageURL
+          const variants: Shirt[] = groupedShirt.variants.map(variant => {
+            const size = extractSize(variant);
+            const variantImageUrl = variant.imageURL || 'https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A';
+            return {
+              id: variant._id, // ShirtSize document ID
+              name: groupedShirt.name,
+              description: groupedShirt.description || '',
+              imageUrl: variantImageUrl, // Per-size imageURL
+              originalPrice: variant.price, // Per-size price
+              discountedPrice: variant.finalPrice,
+              size,
+              type,
+              stock: variant.stock || 0,
+            };
+          });
+          
+          // Calculate representative price for grouped shirt (use first variant or average)
+          const representativePrice = variants.length > 0 ? variants[0].originalPrice : 0;
+          const representativeFinalPrice = variants.length > 0 ? variants[0].discountedPrice : 0;
           
           // Return grouped shirt
           return {
             id: groupedShirt._id,
             name: groupedShirt.name,
             description: groupedShirt.description || '',
-            type: groupedShirt.type,
-            originalPrice: groupedShirt.price,
-            discountedPrice: groupedShirt.finalPrice,
+            type,
+            originalPrice: representativePrice, // Representative price
+            discountedPrice: representativeFinalPrice, // Representative final price
             variants,
             availableSizes: groupedShirt.availableSizes,
           } as GroupedShirt;
@@ -103,17 +244,7 @@ export async function fetchShirts(
     
     // Standard response (individual variants)
     return {
-      data: backendData.shirts.map((shirt: BackendShirt) => ({
-        id: shirt._id,
-        name: shirt.name,
-        description: shirt.description || '',
-        imageUrl: '/placeholder-shirt.jpg',
-        originalPrice: shirt.price,
-        discountedPrice: shirt.finalPrice,
-        size: shirt.size,
-        type: shirt.type,
-        stock: shirt.stock || 0,
-      })),
+      data: backendData.shirts.map((shirt: BackendShirt) => mapBackendShirtToShirt(shirt)),
       total: backendData.total,
       page: backendData.page,
       limit: backendData.limit,
@@ -127,6 +258,9 @@ export async function fetchShirts(
 
 /**
  * Fetch a single shirt by ID (Public)
+ * NEW API: Returns shirt design and shirtSizes array separately
+ * @param shirtId - Shirt design ID (not ShirtSize document ID)
+ * @returns First variant as Shirt (for backward compatibility)
  */
 export async function fetchShirtById(shirtId: string): Promise<Shirt> {
   const response = await fetch(`${API_BASE_URL}/shirts/${shirtId}`, {
@@ -135,43 +269,142 @@ export async function fetchShirtById(shirtId: string): Promise<Shirt> {
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch shirt: ${response.statusText}`);
+    const errorData = await response.json().catch(() => ({}));
+    const errorMessage = errorData.message || `Failed to fetch shirt: ${response.statusText}`;
+    throw new Error(errorMessage);
   }
 
   const apiResponse = await response.json();
 
-  if (apiResponse.success && apiResponse.data?.shirt) {
-    const shirt = apiResponse.data.shirt;
-    return {
-      id: shirt._id,
-      name: shirt.name,
-      description: shirt.description || '',
-      imageUrl: shirt.imageUrl || '/placeholder-shirt.jpg',
-      originalPrice: shirt.price,
-      discountedPrice: shirt.finalPrice,
-      size: shirt.size,
-      type: shirt.type,
-      stock: shirt.stock || 0,
-    };
+  if (!apiResponse.success) {
+    throw new Error(apiResponse.message || 'Shirt not found');
   }
 
-  throw new Error('Shirt not found');
+  // Backend may return 'sizes' or 'shirtSizes'
+  const shirtSizesArray = apiResponse.data?.shirtSizes || apiResponse.data?.sizes;
+  
+  if (apiResponse.data?.shirt && shirtSizesArray && Array.isArray(shirtSizesArray)) {
+    const shirtDesign = apiResponse.data.shirt;
+    
+    // Use the first size variant (or you could return all variants)
+    if (shirtSizesArray.length > 0) {
+      const firstVariant = shirtSizesArray[0];
+      const size = extractSize(firstVariant);
+      const type = extractType(shirtDesign);
+      
+      // Extract reference data
+      referenceDataManager.extractFromShirt({ ...firstVariant, ...shirtDesign } as BackendShirt);
+      
+      return {
+        id: shirtId, // Use design ID (not ShirtSize document ID) for consistency
+        name: shirtDesign.name,
+        description: shirtDesign.description || '',
+        imageUrl: firstVariant.imageURL || 'https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A',
+        originalPrice: firstVariant.price, // Per-size price
+        discountedPrice: firstVariant.finalPrice,
+        size,
+        type,
+        stock: firstVariant.stock || 0,
+      };
+    }
+  }
+
+  throw new Error(apiResponse.message || 'Shirt not found');
 }
 
 /**
- * Fetch all variants of a shirt (same name, type, price) - for product detail page
- * Uses the list endpoint with filters to get all variants
+ * Fetch all variants of a shirt design by design ID
+ * NEW API: Uses the shirtSizes array from fetchShirtById response
+ */
+export async function fetchShirtVariantsByDesignId(shirtId: string): Promise<Shirt[]> {
+  const url = `${API_BASE_URL}/shirts/${shirtId}`;
+  
+  const response = await fetch(url, {
+    method: 'GET',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    let errorMessage = `Failed to fetch shirt variants: ${response.statusText}`;
+    try {
+      const errorData = await response.json();
+      errorMessage = errorData.message || errorMessage;
+    } catch (e) {
+      // Ignore JSON parse errors
+    }
+    throw new Error(errorMessage);
+  }
+
+  const apiResponse = await response.json();
+
+  if (!apiResponse.success) {
+    throw new Error(apiResponse.message || 'Failed to fetch shirt variants');
+  }
+
+  // Check for the expected response structure
+  if (!apiResponse.data) {
+    throw new Error('Invalid API response: missing data field');
+  }
+
+  // API documentation: response includes 'shirtSizes' and 'sizes' (alias)
+  const { shirt: shirtDesign, shirtSizes, sizes } = apiResponse.data;
+  // Prioritize 'shirtSizes' over 'sizes' alias
+  const shirtSizesArray = shirtSizes || sizes;
+
+  if (!shirtDesign) {
+    throw new Error('Shirt design not found');
+  }
+
+  if (!shirtSizesArray || !Array.isArray(shirtSizesArray) || shirtSizesArray.length === 0) {
+    throw new Error('Shirt has no size variants');
+  }
+  
+  const type = extractType(shirtDesign);
+  
+  // Map all ShirtSize documents to Shirt format
+  // API returns ALL variants (including stock = 0), sorted by sizeReference.order
+  // Each variant has sizeReference populated with name, displayName, order
+  const mappedVariants = shirtSizesArray.map((shirtSize: any) => {
+    // Extract size from sizeReference.name (per API documentation)
+    const size = extractSize(shirtSize);
+    
+    // Extract reference data for future filter operations
+    referenceDataManager.extractFromShirt({ ...shirtSize, ...shirtDesign } as BackendShirt);
+    
+    return {
+      id: shirtSize._id, // ShirtSize document ID for cart operations
+      name: shirtDesign.name,
+      description: shirtDesign.description || '',
+      imageUrl: shirtSize.imageURL || 'https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A',
+      originalPrice: shirtSize.price, // Per-size price (varies by size)
+      discountedPrice: shirtSize.finalPrice, // Calculated with discount
+      size, // Extracted from sizeReference.name
+      type,
+      stock: shirtSize.stock || 0, // Can be 0 (out of stock)
+    };
+  });
+  
+  // Variants are already sorted by sizeReference.order from backend
+  // Return as-is to preserve the order (M, L, XL, XXL)
+  return mappedVariants;
+}
+
+/**
+ * Fetch all variants of a shirt (same design) - for product detail page
+ * NEW API: Fetches by shirtId (design ID) to get all size variants
  */
 export async function fetchShirtVariants(shirt: Shirt): Promise<Shirt[]> {
-  // Fetch individual variants (not grouped)
+  // Try to get shirtId from the shirt (if it's a ShirtSize document, we need the design ID)
+  // For now, fetch by name and type, then filter
   const response = await fetchShirts(
     { type: shirt.type },
     { page: 1, limit: 100 } // Get enough to find all variants
   ) as PaginatedResponse<Shirt>;
 
-  // Filter to get only variants with same name and price
+  // Filter to get only variants with same name (all size variants share the same name)
+  // Note: Price can vary by size now, so we don't filter by price
   return response.data.filter(
-    s => s.name === shirt.name && s.originalPrice === shirt.originalPrice
+    s => s.name === shirt.name
   );
 }
 
@@ -230,18 +463,44 @@ export async function batchCreateShirts(shirtData: BatchCreateShirtData): Promis
     };
   }
 
+  // API documentation shows 'shirtSizes', but backend may return 'sizes' (support both)
+  // Prioritize documented field name 'shirtSizes' over 'sizes'
+  const shirtSizesArray = data.data?.shirtSizes || data.data?.sizes;
+  
+  if (data.success && data.data?.shirt && shirtSizesArray && Array.isArray(shirtSizesArray)) {
+    const shirtDesign = data.data.shirt;
+    
+    // Map ShirtSize documents to Shirt format
+    const shirts: Shirt[] = shirtSizesArray.map((shirtSize: any) => {
+      const size = extractSize(shirtSize);
+      const type = extractType(shirtDesign);
+      
+      // Extract reference data
+      referenceDataManager.extractFromShirt({ ...shirtSize, ...shirtDesign } as BackendShirt);
+      
+      return {
+        id: shirtSize._id, // ShirtSize document ID
+        name: shirtDesign.name,
+        description: shirtDesign.description || '',
+        imageUrl: shirtSize.imageURL || 'https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A',
+        originalPrice: shirtSize.price, // Per-size price
+        discountedPrice: shirtSize.finalPrice,
+        size,
+        type,
+        stock: shirtSize.stock || 0,
+      };
+    });
+
+    return {
+      success: true,
+      message: data.message,
+      shirts,
+    };
+  }
+  
+  // Legacy support for old response format
   if (data.success && data.data?.shirts) {
-    const shirts: Shirt[] = data.data.shirts.map((backendShirt: BackendShirt) => ({
-      id: backendShirt._id,
-      name: backendShirt.name,
-      description: backendShirt.description || '',
-      imageUrl: '/placeholder-shirt.jpg',
-      originalPrice: backendShirt.price,
-      discountedPrice: backendShirt.finalPrice,
-      size: backendShirt.size,
-      type: backendShirt.type,
-      stock: backendShirt.stock || 0,
-    }));
+    const shirts: Shirt[] = data.data.shirts.map((backendShirt: BackendShirt) => mapBackendShirtToShirt(backendShirt));
 
     return {
       success: true,
@@ -279,22 +538,40 @@ export async function createShirt(shirtData: CreateShirtData): Promise<{ success
     };
   }
 
+  // NEW API: Returns shirt design and shirtSize (single variant)
+  if (data.success && data.data?.shirt && data.data?.shirtSize) {
+    const shirtDesign = data.data.shirt;
+    const shirtSize = data.data.shirtSize;
+    const size = extractSize(shirtSize);
+    const type = extractType(shirtDesign);
+    
+    // Extract reference data
+    referenceDataManager.extractFromShirt({ ...shirtSize, ...shirtDesign } as BackendShirt);
+    
+    return {
+      success: true,
+      message: data.message,
+      shirt: {
+        id: shirtSize._id, // ShirtSize document ID
+        name: shirtDesign.name,
+        description: shirtDesign.description || '',
+        imageUrl: shirtSize.imageURL || 'https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A',
+        originalPrice: shirtSize.price, // Per-size price
+        discountedPrice: shirtSize.finalPrice,
+        size,
+        type,
+        stock: shirtSize.stock || 0,
+      },
+    };
+  }
+  
+  // Legacy support for old response format
   if (data.success && data.data?.shirt) {
     const backendShirt: BackendShirt = data.data.shirt;
     return {
       success: true,
       message: data.message,
-      shirt: {
-        id: backendShirt._id,
-        name: backendShirt.name,
-        description: backendShirt.description || '',
-        imageUrl: '/placeholder-shirt.jpg',
-        originalPrice: backendShirt.price,
-        discountedPrice: backendShirt.finalPrice,
-        size: backendShirt.size,
-        type: backendShirt.type,
-        stock: backendShirt.stock || 0,
-      },
+      shirt: mapBackendShirtToShirt(backendShirt),
     };
   }
 
@@ -332,51 +609,77 @@ export async function updateShirt(
 
   if (data.success && data.data) {
     const result: { shirt?: Shirt; updatedShirts?: Shirt[]; createdShirts?: Shirt[]; updatedCount?: number; createdCount?: number } = {};
+    const shirtDesign = data.data.shirt;
     
-    // Map updated shirt
-    if (data.data.shirt) {
-      const backendShirt: BackendShirt = data.data.shirt;
-      result.shirt = {
-        id: backendShirt._id,
-        name: backendShirt.name,
-        description: backendShirt.description || '',
-        imageUrl: '/placeholder-shirt.jpg',
-        originalPrice: backendShirt.price,
-        discountedPrice: backendShirt.finalPrice,
-        size: backendShirt.size,
-        type: backendShirt.type,
-        stock: backendShirt.stock || 0,
-      };
+    // Map updated shirt design (if provided)
+    // Note: The main shirt is the design, but we need a ShirtSize to create a Shirt
+    // For now, we'll use the first updated or created variant if available
+    if (shirtDesign) {
+      // Try to get a variant to map
+      const firstVariant = data.data.updatedShirtSizes?.[0] || data.data.createdShirtSizes?.[0];
+      if (firstVariant) {
+        const size = extractSize(firstVariant);
+        const type = extractType(shirtDesign);
+        result.shirt = {
+          id: firstVariant._id, // Use ShirtSize document ID
+          name: shirtDesign.name,
+          description: shirtDesign.description || '',
+          imageUrl: firstVariant.imageURL || 'https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A',
+          originalPrice: firstVariant.price,
+          discountedPrice: firstVariant.finalPrice,
+          size,
+          type,
+          stock: firstVariant.stock || 0,
+        };
+      }
     }
 
-    // Map updated shirts (existing variants that were updated)
+    // Map updated shirt sizes (NEW API: updatedShirtSizes instead of updatedShirts)
+    if (data.data.updatedShirtSizes && Array.isArray(data.data.updatedShirtSizes)) {
+      result.updatedShirts = data.data.updatedShirtSizes.map((shirtSize: any) => {
+        const size = extractSize(shirtSize);
+        const type = extractType(shirtDesign || {});
+        return {
+          id: shirtSize._id,
+          name: shirtDesign?.name || '',
+          description: shirtDesign?.description || '',
+          imageUrl: shirtSize.imageURL || 'https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A',
+          originalPrice: shirtSize.price,
+          discountedPrice: shirtSize.finalPrice,
+          size,
+          type,
+          stock: shirtSize.stock || 0,
+        };
+      });
+    }
+    
+    // Legacy support for old format
     if (data.data.updatedShirts && Array.isArray(data.data.updatedShirts)) {
-      result.updatedShirts = data.data.updatedShirts.map((backendShirt: BackendShirt) => ({
-        id: backendShirt._id,
-        name: backendShirt.name,
-        description: backendShirt.description || '',
-        imageUrl: '/placeholder-shirt.jpg',
-        originalPrice: backendShirt.price,
-        discountedPrice: backendShirt.finalPrice,
-        size: backendShirt.size,
-        type: backendShirt.type,
-        stock: backendShirt.stock || 0,
-      }));
+      result.updatedShirts = data.data.updatedShirts.map((backendShirt: BackendShirt) => mapBackendShirtToShirt(backendShirt));
     }
 
-    // Map created shirts (new variants that were created)
+    // Map created shirt sizes (NEW API: createdShirtSizes instead of createdShirts)
+    if (data.data.createdShirtSizes && Array.isArray(data.data.createdShirtSizes)) {
+      result.createdShirts = data.data.createdShirtSizes.map((shirtSize: any) => {
+        const size = extractSize(shirtSize);
+        const type = extractType(shirtDesign || {});
+        return {
+          id: shirtSize._id,
+          name: shirtDesign?.name || '',
+          description: shirtDesign?.description || '',
+          imageUrl: shirtSize.imageURL || 'https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A',
+          originalPrice: shirtSize.price,
+          discountedPrice: shirtSize.finalPrice,
+          size,
+          type,
+          stock: shirtSize.stock || 0,
+        };
+      });
+    }
+    
+    // Legacy support for old format
     if (data.data.createdShirts && Array.isArray(data.data.createdShirts)) {
-      result.createdShirts = data.data.createdShirts.map((backendShirt: BackendShirt) => ({
-        id: backendShirt._id,
-        name: backendShirt.name,
-        description: backendShirt.description || '',
-        imageUrl: '/placeholder-shirt.jpg',
-        originalPrice: backendShirt.price,
-        discountedPrice: backendShirt.finalPrice,
-        size: backendShirt.size,
-        type: backendShirt.type,
-        stock: backendShirt.stock || 0,
-      }));
+      result.createdShirts = data.data.createdShirts.map((backendShirt: BackendShirt) => mapBackendShirtToShirt(backendShirt));
     }
 
     result.updatedCount = data.data.updatedCount || 0;
@@ -443,18 +746,13 @@ export async function fetchSellerShirts(
 
   if (apiResponse.success && apiResponse.data) {
     const backendData = apiResponse.data;
+    // Extract reference data
+    backendData.shirts.forEach((shirt: BackendShirt) => {
+      referenceDataManager.extractFromShirt(shirt);
+    });
+    
     return {
-      data: backendData.shirts.map((shirt: BackendShirt) => ({
-        id: shirt._id,
-        name: shirt.name,
-        description: shirt.description || '',
-        imageUrl: '/placeholder-shirt.jpg',
-        originalPrice: shirt.price,
-        discountedPrice: shirt.finalPrice,
-        size: shirt.size,
-        type: shirt.type,
-        stock: shirt.stock || 0,
-      })),
+      data: backendData.shirts.map((shirt: BackendShirt) => mapBackendShirtToShirt(shirt)),
       total: backendData.total,
       page: backendData.page,
       limit: backendData.limit,
@@ -515,5 +813,224 @@ export async function sellerLogout(): Promise<{ success: boolean; message?: stri
   return {
     success: data.success || true,
     message: data.message,
+  };
+}
+
+/**
+ * Admin logout - clears authentication cookie
+ */
+export async function adminLogout(): Promise<{ success: boolean; message?: string }> {
+  const response = await fetch(`${API_BASE_URL}/auth/logout`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    return {
+      success: false,
+      message: data.message || 'Logout failed',
+    };
+  }
+
+  // Clear admin auth state on logout
+  if (typeof window !== 'undefined') {
+    localStorage.removeItem('admin_authenticated');
+  }
+
+  return {
+    success: data.success || true,
+    message: data.message,
+  };
+}
+
+/**
+ * Customer logout - clears authentication cookie
+ */
+export async function customerLogout(): Promise<{ success: boolean; message?: string }> {
+  const response = await fetch(`${API_BASE_URL}/auth/logout`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    return {
+      success: false,
+      message: data.message || 'Logout failed',
+    };
+  }
+
+  // Clear customer auth state on logout
+  if (typeof window !== 'undefined') {
+    localStorage.removeItem('customer_authenticated');
+  }
+
+  return {
+    success: data.success || true,
+    message: data.message,
+  };
+}
+
+/**
+ * Check if admin is authenticated
+ */
+export function checkAdminAuth(): boolean {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+  return localStorage.getItem('admin_authenticated') === 'true';
+}
+
+/**
+ * Check if customer is authenticated
+ */
+export function checkCustomerAuth(): boolean {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+  return localStorage.getItem('customer_authenticated') === 'true';
+}
+
+/**
+ * Health Check - Check if the server is running
+ */
+export async function healthCheck(): Promise<{ success: boolean; message?: string; timestamp?: string }> {
+  const response = await fetch(`${BASE_URL}/health`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    return {
+      success: false,
+      message: data.message || 'Health check failed',
+    };
+  }
+
+  return {
+    success: data.success || true,
+    message: data.message,
+    timestamp: data.timestamp,
+  };
+}
+
+/**
+ * Admin login - Authenticate an administrator
+ */
+export async function adminLogin(credentials: LoginCredentials): Promise<AdminLoginResponse> {
+  const response = await fetch(`${API_BASE_URL}/admin/login`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    credentials: 'include',
+    body: JSON.stringify(credentials),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    return {
+      success: false,
+      message: data.message || 'Login failed',
+    };
+  }
+
+  return {
+    success: data.success || true,
+    message: data.message,
+    data: data.data,
+  };
+}
+
+/**
+ * Create seller (Admin only) - Create a new seller account
+ */
+export async function createSeller(sellerData: CreateSellerData): Promise<{ success: boolean; message?: string; data?: { seller: { id: string; email: string; name: string } } }> {
+  const response = await fetch(`${API_BASE_URL}/admin/sellers`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    credentials: 'include',
+    body: JSON.stringify(sellerData),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    return {
+      success: false,
+      message: data.message || 'Failed to create seller',
+    };
+  }
+
+  return {
+    success: data.success || true,
+    message: data.message,
+    data: data.data,
+  };
+}
+
+/**
+ * Customer signup - Create a new customer account and auto-login
+ */
+export async function customerSignup(signupData: CustomerSignupData): Promise<LoginResponse> {
+  const response = await fetch(`${API_BASE_URL}/auth/customer/signup`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    credentials: 'include',
+    body: JSON.stringify(signupData),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    return {
+      success: false,
+      message: data.message || 'Signup failed',
+    };
+  }
+
+  return {
+    success: data.success || true,
+    message: data.message,
+    data: data.data,
+  };
+}
+
+/**
+ * Customer login - Authenticate a customer
+ */
+export async function customerLogin(credentials: LoginCredentials): Promise<LoginResponse> {
+  const response = await fetch(`${API_BASE_URL}/auth/customer/login`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    credentials: 'include',
+    body: JSON.stringify(credentials),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    return {
+      success: false,
+      message: data.message || 'Login failed',
+    };
+  }
+
+  return {
+    success: data.success || true,
+    message: data.message,
+    data: data.data,
   };
 }

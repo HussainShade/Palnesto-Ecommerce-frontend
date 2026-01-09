@@ -1,14 +1,12 @@
 import Link from 'next/link';
 import type { Shirt } from '@/types';
-import { addToCart } from '@/lib/cart';
 
 interface ShirtCardProps {
   shirt: Shirt;
-  onAddToCart: () => void;
   availableSizes?: string[]; // Available sizes for this shirt design
 }
 
-export default function ShirtCard({ shirt, onAddToCart, availableSizes }: ShirtCardProps) {
+export default function ShirtCard({ shirt, availableSizes }: ShirtCardProps) {
   const discountPercentage = Math.round(
     ((shirt.originalPrice - shirt.discountedPrice) / shirt.originalPrice) * 100
   );
@@ -18,7 +16,7 @@ export default function ShirtCard({ shirt, onAddToCart, availableSizes }: ShirtC
     : `Size: ${shirt.size}`;
 
   return (
-    <Link href={`/shirts/${shirt.id}`}>
+    <Link href={`/shirts/${shirt.id}`} className="block">
       <div className="border border-gray-200 rounded-lg overflow-hidden hover:shadow-lg transition-shadow cursor-pointer">
         <div className="aspect-square bg-gray-100 relative">
           <img
@@ -43,12 +41,9 @@ export default function ShirtCard({ shirt, onAddToCart, availableSizes }: ShirtC
               ₹{shirt.discountedPrice.toFixed(2)}
             </span>
           </div>
-          <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center justify-between">
             <span className="text-sm text-gray-600">{sizesText}</span>
             <span className="text-sm text-gray-600">{shirt.type}</span>
-          </div>
-          <div className="text-center text-sm text-blue-600 font-medium">
-            View Details →
           </div>
         </div>
       </div>

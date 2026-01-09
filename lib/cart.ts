@@ -1,4 +1,4 @@
-import type { Cart, CartItem, Shirt } from '@/types';
+import type { Cart, CartItem, Shirt, ShirtSize } from '@/types';
 
 const CART_STORAGE_KEY = 'shirt_ecommerce_cart';
 
@@ -28,19 +28,25 @@ export function saveCart(cart: Cart): void {
   
   try {
     localStorage.setItem(CART_STORAGE_KEY, JSON.stringify(cart));
+    // Dispatch custom event to notify cart updates (for same-tab updates)
+    window.dispatchEvent(new CustomEvent('cartUpdated'));
   } catch (error) {
     console.error('Failed to save cart to localStorage:', error);
   }
 }
 
-export function addToCart(shirtId: string, quantity: number = 1): Cart {
+export function addToCart(shirtId: string, quantity: number = 1, size?: ShirtSize): Cart {
   const cart = getCart();
-  const existingItem = cart.items.find(item => item.shirtId === shirtId);
+  // If size is provided, match by both design ID and size
+  // Otherwise, match by design ID only (backward compatibility)
+  const existingItem = size 
+    ? cart.items.find(item => item.shirtId === shirtId && item.size === size)
+    : cart.items.find(item => item.shirtId === shirtId);
 
   if (existingItem) {
     existingItem.quantity += quantity;
   } else {
-    cart.items.push({ shirtId, quantity });
+    cart.items.push({ shirtId, size, quantity });
   }
 
   // Note: totalAmount will be calculated when rendering with actual shirt prices

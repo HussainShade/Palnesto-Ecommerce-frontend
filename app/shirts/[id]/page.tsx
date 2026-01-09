@@ -4,11 +4,9 @@ import { useState, useEffect } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import type { Shirt, ShirtSize } from '@/types';
-import { fetchShirtById, fetchShirtVariants } from '@/lib/api';
+import { fetchShirtById, fetchShirtVariantsByDesignId } from '@/lib/api';
 import { addToCart, getCart } from '@/lib/cart';
 import Cart from '@/components/Cart';
-
-const SIZES: ShirtSize[] = ['M', 'L', 'XL', 'XXL'];
 
 export default function ShirtDetailPage() {
   const params = useParams();
@@ -44,34 +42,104 @@ export default function ShirtDetailPage() {
     setLoading(true);
     setError(null);
     try {
-      const shirtData = await fetchShirtById(shirtId);
-      setShirt(shirtData);
+      // Fetch shirt design and all variants in one call
+      // The API returns both shirt design and all sizes in one response
+      const allVariants = await fetchShirtVariantsByDesignId(shirtId);
       
-      // Fetch all variants of this shirt
-      const allVariants = await fetchShirtVariants(shirtData);
+      if (!allVariants || allVariants.length === 0) {
+        throw new Error('Shirt not found or has no variants');
+      }
+      
+      // Store all variants from API (including those with stock = 0)
+      // API returns ALL variants sorted by sizeReference.order (M, L, XL, XXL)
       setVariants(allVariants);
+      
+      // Create a base shirt object with design info (name, description, type)
+      // Price and image will come from the selected variant
+      const baseShirt: Shirt = {
+        id: shirtId, // Use design ID
+        name: allVariants[0].name,
+        description: allVariants[0].description,
+        imageUrl: allVariants[0].imageUrl, // Will be updated when size changes
+        originalPrice: allVariants[0].originalPrice, // Will be updated when size changes
+        discountedPrice: allVariants[0].discountedPrice, // Will be updated when size changes
+        size: allVariants[0].size,
+        type: allVariants[0].type,
+        stock: allVariants[0].stock,
+      };
+      setShirt(baseShirt);
       
       // Set initial selected size to first available size
       const firstAvailable = allVariants.find(v => v.stock > 0);
       if (firstAvailable) {
         setSelectedSize(firstAvailable.size);
+        // Update shirt with first available variant's price and image
+        setShirt({
+          ...baseShirt,
+          imageUrl: firstAvailable.imageUrl,
+          originalPrice: firstAvailable.originalPrice,
+          discountedPrice: firstAvailable.discountedPrice,
+        });
       } else if (allVariants.length > 0) {
         setSelectedSize(allVariants[0].size);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load shirt details');
+      console.error('Error loading shirt data:', err);
+      const errorMessage = err instanceof Error ? err.message : 'Failed to load shirt details';
+      setError(errorMessage);
     } finally {
       setLoading(false);
     }
   };
 
+  // Group variants by size and get the first variant for each size (in case of duplicates)
   const getVariantBySize = (size: ShirtSize | null): Shirt | null => {
     if (!size) return null;
+    // If multiple variants exist for the same size, use the first one
     return variants.find(v => v.size === size) || null;
   };
 
+  // Get unique sizes from variants (deduplicate by size) - only show sizes that exist in API
+  const getUniqueSizes = (): { size: ShirtSize; variant: Shirt; stock: number }[] => {
+    const sizeMap = new Map<ShirtSize, Shirt>();
+    
+    // Group variants by size, keeping the first one for each size
+    variants.forEach(variant => {
+      if (!sizeMap.has(variant.size)) {
+        sizeMap.set(variant.size, variant);
+      }
+    });
+    
+    // Return only sizes that exist in the API response (no static sizes)
+    return Array.from(sizeMap.entries()).map(([size, variant]) => ({
+      size,
+      variant,
+      stock: variant.stock,
+    }));
+  };
+
   const selectedVariant = getVariantBySize(selectedSize);
-  const availableSizes = variants.filter(v => v.stock > 0).map(v => v.size);
+  const uniqueSizes = getUniqueSizes();
+  const availableSizes = uniqueSizes.filter(s => s.stock > 0);
+  const outOfStockSizes = uniqueSizes.filter(s => s.stock === 0);
+
+  // Update shirt price and image when size changes
+  useEffect(() => {
+    if (selectedVariant && shirt) {
+      setShirt(prevShirt => {
+        if (!prevShirt) return prevShirt;
+        return {
+          ...prevShirt,
+          imageUrl: selectedVariant.imageUrl,
+          originalPrice: selectedVariant.originalPrice,
+          discountedPrice: selectedVariant.discountedPrice,
+          stock: selectedVariant.stock,
+        };
+      });
+      // Reset quantity to 1 when size changes
+      setQuantity(1);
+    }
+  }, [selectedSize, selectedVariant]);
 
   const handleAddToCart = () => {
     if (!selectedVariant || selectedVariant.stock === 0) {
@@ -84,10 +152,20 @@ export default function ShirtDetailPage() {
       return;
     }
 
-    addToCart(selectedVariant.id, quantity);
+    // Store design ID and size in cart
+    // This allows Cart component to fetch all variants and find the matching one
+    addToCart(shirtId, quantity, selectedVariant.size);
     setCartItemCount(prev => prev + quantity);
     setAddedToCart(true);
     setTimeout(() => setAddedToCart(false), 2000);
+    
+    // Trigger cart update to refresh Cart component if it's open
+    const updateCartCount = () => {
+      const cart = getCart();
+      const count = cart.items.reduce((sum, item) => sum + item.quantity, 0);
+      setCartItemCount(count);
+    };
+    updateCartCount();
   };
 
   const discountPercentage = shirt
@@ -186,39 +264,58 @@ export default function ShirtDetailPage() {
                 <span className="text-sm font-medium text-gray-900">{shirt.type}</span>
               </div>
 
-              {/* Size Selection */}
+              {/* Size Selection - Only show sizes that exist in API response */}
               <div className="mb-6">
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Select Size *
                 </label>
-                <div className="flex gap-2">
-                  {SIZES.map(size => {
-                    const variant = variants.find(v => v.size === size);
-                    const isAvailable = variant && variant.stock > 0;
-                    const isSelected = selectedSize === size;
-                    
-                    return (
-                      <button
-                        key={size}
-                        onClick={() => isAvailable && setSelectedSize(size)}
-                        disabled={!isAvailable}
-                        className={`
-                          px-4 py-2 border-2 rounded font-medium transition-colors
-                          ${isSelected 
-                            ? 'border-blue-600 bg-blue-50 text-blue-600' 
-                            : isAvailable
-                            ? 'border-gray-300 hover:border-gray-400 text-gray-700'
-                            : 'border-gray-200 bg-gray-100 text-gray-400 cursor-not-allowed'
-                          }
-                        `}
-                      >
-                        {size}
-                        {variant && variant.stock > 0 && (
-                          <span className="ml-1 text-xs">({variant.stock})</span>
-                        )}
-                      </button>
-                    );
-                  })}
+                <div className="space-y-3">
+                  {/* Available Sizes - Only show sizes from API with stock > 0 */}
+                  {availableSizes.length > 0 && (
+                    <div>
+                      <p className="text-xs text-gray-500 mb-2">Available Sizes:</p>
+                      <div className="flex flex-wrap gap-2">
+                        {availableSizes.map(({ size, variant, stock }) => {
+                          const isSelected = selectedSize === size;
+                          
+                          return (
+                            <button
+                              key={`available-${variant.id}`}
+                              onClick={() => setSelectedSize(size)}
+                              className={`
+                                px-4 py-2 border-2 rounded font-medium transition-colors
+                                ${isSelected 
+                                  ? 'border-blue-600 bg-blue-50 text-blue-600' 
+                                  : 'border-gray-300 hover:border-gray-400 text-gray-700'
+                                }
+                              `}
+                            >
+                              {size}
+                              <span className="ml-1 text-xs">({stock})</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                  
+                  {/* Out of Stock Sizes - Only show sizes from API with stock = 0 */}
+                  {outOfStockSizes.length > 0 && (
+                    <div>
+                      <p className="text-xs text-gray-500 mb-2">Out of Stock:</p>
+                      <div className="flex flex-wrap gap-2">
+                        {outOfStockSizes.map(({ size, variant }) => (
+                          <button
+                            key={`outofstock-${variant.id}`}
+                            disabled
+                            className="px-4 py-2 border-2 border-gray-200 bg-gray-100 text-gray-400 cursor-not-allowed rounded font-medium"
+                          >
+                            {size}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
                 {selectedVariant && selectedVariant.stock === 0 && (
                   <p className="text-red-600 text-sm mt-2">This size is out of stock</p>
@@ -255,9 +352,6 @@ export default function ShirtDetailPage() {
                     >
                       +
                     </button>
-                    <span className="text-sm text-gray-600">
-                      (Max: {selectedVariant.stock})
-                    </span>
                   </div>
                 </div>
               )}
@@ -313,6 +407,7 @@ export default function ShirtDetailPage() {
           const cart = getCart();
           const count = cart.items.reduce((sum, item) => sum + item.quantity, 0);
           setCartItemCount(count);
+          // Cart component will auto-refresh via interval when open
         }}
       />
     </div>

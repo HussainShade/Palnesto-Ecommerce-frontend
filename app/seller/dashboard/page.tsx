@@ -2,8 +2,9 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
-import type { Shirt, BatchCreateShirtData, UpdateShirtData, PaginationParams } from '@/types';
+import type { Shirt, BatchCreateShirtData, UpdateShirtData, PaginationParams, ShirtSize, ShirtType } from '@/types';
 import { fetchSellerShirts, batchCreateShirts, updateShirt, deleteShirt, sellerLogout, setSellerAuthState } from '@/lib/api';
+import { referenceDataManager } from '@/lib/referenceData';
 import ShirtForm from '@/components/ShirtForm';
 import Pagination from '@/components/Pagination';
 
@@ -101,12 +102,80 @@ export default function SellerDashboard() {
     }
   };
 
+  // Helper to convert form data to API format (string sizes/types to ObjectIds)
+  const convertToApiFormat = (data: BatchCreateShirtData | UpdateShirtData): BatchCreateShirtData | UpdateShirtData => {
+    // For BatchCreateShirtData
+    if ('sizes' in data && Array.isArray(data.sizes) && data.sizes.length > 0 && 'size' in data.sizes[0]) {
+      const batchData = data as any;
+      const typeId = referenceDataManager.getTypeId(batchData.type as ShirtType);
+      if (!typeId) {
+        throw new Error('Type ID not found. Please refresh the page and try again.');
+      }
+      
+      // NEW API: Each size needs sizeReferenceId, price, imageURL, and stock
+      return {
+        ...batchData,
+        shirtTypeId: typeId,
+        sizes: batchData.sizes.map((pair: { size: ShirtSize; stock: number; price?: number; imageURL?: string }) => {
+          const sizeId = referenceDataManager.getSizeId(pair.size);
+          if (!sizeId) {
+            throw new Error(`Size ID not found for ${pair.size}. Please refresh the page and try again.`);
+          }
+          return {
+            sizeReferenceId: sizeId, // NEW API uses sizeReferenceId
+            price: pair.price || batchData.price || 0, // Use per-size price or fallback to main price
+            imageURL: pair.imageURL || batchData.imageURL, // Use per-size imageURL or fallback
+            stock: pair.stock,
+          };
+        }),
+      } as BatchCreateShirtData;
+    }
+    
+    // For UpdateShirtData
+    const updateData = data as any;
+    const converted: any = { ...updateData };
+    
+    if (updateData.type) {
+      const typeId = referenceDataManager.getTypeId(updateData.type as ShirtType);
+      if (!typeId) {
+        throw new Error('Type ID not found. Please refresh the page and try again.');
+      }
+      converted.shirtTypeId = typeId;
+      delete converted.type;
+    }
+    
+    // Handle currentSizeVariant for updating the main shirt's size variant
+    if (updateData.currentSizeVariant) {
+      converted.currentSizeVariant = updateData.currentSizeVariant;
+    }
+    
+    // NEW API: Each size in sizes array needs sizeReferenceId, price, imageURL, and stock
+    if (updateData.sizes && Array.isArray(updateData.sizes)) {
+      converted.sizes = updateData.sizes.map((pair: { size: ShirtSize; stock: number; price?: number; imageURL?: string }) => {
+        const sizeId = referenceDataManager.getSizeId(pair.size);
+        if (!sizeId) {
+          throw new Error(`Size ID not found for ${pair.size}. Please refresh the page and try again.`);
+        }
+        return {
+          sizeReferenceId: sizeId, // NEW API uses sizeReferenceId
+          price: pair.price || 0, // Use per-size price (required in new API)
+          imageURL: pair.imageURL, // Use per-size imageURL (optional)
+          stock: pair.stock,
+        };
+      });
+    }
+    
+    return converted as UpdateShirtData;
+  };
+
   const handleCreate = async (data: BatchCreateShirtData | UpdateShirtData) => {
     setFormLoading(true);
     setError(null);
     try {
+      // Convert string values to ObjectIds
+      const convertedData = convertToApiFormat(data);
       // In create mode, data will always be BatchCreateShirtData
-      const result = await batchCreateShirts(data as BatchCreateShirtData);
+      const result = await batchCreateShirts(convertedData as BatchCreateShirtData);
       
       if (result.success) {
         const count = result.shirts?.length || 0;
@@ -141,18 +210,25 @@ export default function SellerDashboard() {
       const existingSizes = new Set(existingVariants.map(v => v.size));
       
       // Separate sizes into: with stock > 0 (can use sizes array) and stock = 0 (need individual updates)
-      const sizesArray = data.sizes || [];
-      const sizesWithStock = sizesArray.filter(pair => pair.stock > 0);
-      const sizesWithZeroStock = sizesArray.filter(pair => pair.stock === 0 && existingSizes.has(pair.size));
+      // Work with original data format (with 'size' property) before conversion
+      const sizesArray = (data.sizes || []) as any[];
+      const sizesWithStock = sizesArray.filter((pair: any) => pair.stock > 0 && ('size' in pair || 'shirtSizeId' in pair));
+      const sizesWithZeroStock = sizesArray.filter((pair: any) => {
+        const size = 'size' in pair ? pair.size : null;
+        return pair.stock === 0 && size && existingSizes.has(size);
+      });
       
       // Prepare update data - only include sizes with stock > 0 in sizes array
-      const updateData: UpdateShirtData = {
+      const updateData: any = {
         ...data,
         sizes: sizesWithStock.length > 0 ? sizesWithStock : undefined,
       };
       
+      // Convert string values to ObjectIds
+      const convertedData = convertToApiFormat(updateData) as UpdateShirtData;
+      
       // Update main shirt with sizes array (for stock > 0 variants)
-      const result = await updateShirt(mainShirt.id, updateData);
+      const result = await updateShirt(mainShirt.id, convertedData);
       
       if (!result.success) {
         setError(result.message || 'Failed to update shirt');
@@ -162,19 +238,36 @@ export default function SellerDashboard() {
       // Update existing variants with stock = 0 individually
       // (Backend filters out stock = 0 from sizes array, so we need to update them separately)
       if (sizesWithZeroStock.length > 0) {
-        const zeroStockUpdates = sizesWithZeroStock.map(pair => {
+        const zeroStockUpdates = sizesWithZeroStock.map((pair: { size: ShirtSize; stock: number }) => {
           const variant = existingVariants.find(v => v.size === pair.size);
           if (!variant || variant.size === mainSize) return null; // Skip main size
           
-          return updateShirt(variant.id, {
-            stock: 0,
-            // Update shared attributes if they changed
+          // Convert type to ObjectId if provided
+          // NEW API: Use currentSizeVariant to update price, stock, and imageURL
+          const variantUpdateData: any = {
             name: data.name,
             description: data.description,
-            type: data.type,
-            price: data.price,
             discount: data.discount,
-          });
+            currentSizeVariant: {
+              stock: 0,
+              // Use variant's existing price and imageURL
+              price: variant.originalPrice,
+              imageURL: variant.imageUrl,
+            },
+          };
+          
+          // Check if type is provided (could be 'type' string or 'shirtTypeId' ObjectId)
+          const dataAny = data as any;
+          if (dataAny.type) {
+            const typeId = referenceDataManager.getTypeId(dataAny.type as ShirtType);
+            if (typeId) {
+              variantUpdateData.shirtTypeId = typeId;
+            }
+          } else if (dataAny.shirtTypeId) {
+            variantUpdateData.shirtTypeId = dataAny.shirtTypeId;
+          }
+          
+          return updateShirt(variant.id, variantUpdateData);
         }).filter(Boolean) as Promise<{ success: boolean; message?: string }>[];
         
         const zeroStockResults = await Promise.all(zeroStockUpdates);

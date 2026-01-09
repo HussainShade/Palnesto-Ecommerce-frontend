@@ -82,6 +82,8 @@ export default function HomePage() {
         variants.push(...grouped.variants);
       });
       setAllVariants(variants);
+      
+      // If we had pending filters and reference data is now available, they'll be re-applied in the useEffect above
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load shirts');
     } finally {
@@ -105,9 +107,6 @@ export default function HomePage() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const handleAddToCart = () => {
-    updateCartItemCount();
-  };
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -184,12 +183,16 @@ export default function HomePage() {
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
                 {groupedShirts.map(groupedShirt => {
                   // Use the first variant with stock > 0, or first variant if all out of stock
-                  const displayShirt = groupedShirt.variants.find(v => v.stock > 0) || groupedShirt.variants[0];
+                  const displayVariant = groupedShirt.variants.find(v => v.stock > 0) || groupedShirt.variants[0];
+                  // Create a display shirt with design ID (for API) but variant's display info
+                  const displayShirt: Shirt = {
+                    ...displayVariant,
+                    id: groupedShirt.id, // Use design ID for API endpoint
+                  };
                   return (
                     <ShirtCard
                       key={groupedShirt.id}
                       shirt={displayShirt}
-                      onAddToCart={handleAddToCart}
                       availableSizes={groupedShirt.availableSizes}
                     />
                   );

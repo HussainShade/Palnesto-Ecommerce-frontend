@@ -109,9 +109,10 @@ export default function ShirtForm({ shirt, shirts, onSubmit, onCancel, loading }
         return;
       }
       
-      const submitData: UpdateShirtData = {
+      // Use 'any' type temporarily since we'll convert type to shirtTypeId in the dashboard
+      const submitData: any = {
         name: formData.name,
-        type: formData.type,
+        type: formData.type, // Will be converted to shirtTypeId in seller dashboard
         price: formData.price,
         stock: mainStock,
       };
@@ -132,10 +133,24 @@ export default function ShirtForm({ shirt, shirts, onSubmit, onCancel, loading }
         submitData.discount = null;
       }
 
+      // NEW API: Update current size variant using currentSizeVariant
+      submitData.currentSizeVariant = {
+        price: formData.price,
+        stock: mainStock,
+        imageURL: 'https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A',
+      };
+      
       // Get all other sizes (including stock = 0) excluding main shirt's size
-      // Backend will update existing variants (even with stock = 0)
-      // and only create new variants if stock > 0
-      const otherPairs = allSizeStockPairs.filter(pair => pair.size !== mainSize);
+      // NEW API: Each size needs sizeReferenceId, price, imageURL, and stock
+      const otherPairs = allSizeStockPairs
+        .filter(pair => pair.size !== mainSize)
+        .map(pair => ({
+          size: pair.size,
+          stock: pair.stock,
+          price: formData.price, // Use same price for all sizes (can be made per-size later)
+          imageURL: 'https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A',
+        }));
+      
       if (otherPairs.length > 0) {
         submitData.sizes = otherPairs;
       }
@@ -144,9 +159,15 @@ export default function ShirtForm({ shirt, shirts, onSubmit, onCancel, loading }
     } else {
       // Create mode: use batch endpoint with all sizes
       // Get all sizes with stock > 0 (for creation, stock must be > 0)
+      // NEW API: Each size needs sizeReferenceId, price, imageURL, and stock
       const sizeStockPairs = (Object.entries(formData.sizeStocks) as [ShirtSize, number][])
         .filter(([_, stock]) => stock > 0)
-        .map(([size, stock]) => ({ size, stock }));
+        .map(([size, stock]) => ({
+          size,
+          stock,
+          price: formData.price, // Use same price for all sizes (can be made per-size later)
+          imageURL: 'https://fastly.picsum.photos/id/193/200/200.jpg?hmac=JHo5tWHSRWvVbL3HX6rwDNdkvYPFojLtXkEGEUCgz6A',
+        }));
       
       if (sizeStockPairs.length === 0) {
         // Prevent submission if no stock entered for any size
@@ -154,12 +175,12 @@ export default function ShirtForm({ shirt, shirts, onSubmit, onCancel, loading }
         return;
       }
       
-      const submitData: BatchCreateShirtData = {
+      // Use 'any' type temporarily since we'll convert type/size to shirtTypeId/sizeReferenceId in the dashboard
+      const submitData: any = {
         name: formData.name,
         description: formData.description || undefined,
-        type: formData.type,
-        price: formData.price,
-        sizes: sizeStockPairs, // All sizes with stock > 0
+        type: formData.type, // Will be converted to shirtTypeId in seller dashboard
+        sizes: sizeStockPairs, // All sizes with stock > 0 (will be converted to sizeReferenceId in dashboard)
       };
 
       // Add discount if applicable
